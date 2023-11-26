@@ -8,13 +8,13 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"io/ioutil"
 	"log"
-	"net/http" // Для создания HTTP запросов
-	"strconv"  // Для преобразования строк в числа
+	"net/http"
+	"strconv"
 	"strings"
 )
 
 type CurrencyRates struct {
-	Rates map[string]float64 `json:"rates"` // Структура для хранения информации о курсах валют
+	Rates map[string]float64 `json:"rates"`
 }
 
 type Account struct {
@@ -44,7 +44,7 @@ type GoldApiResponse struct {
 	Bid            float64 `json:"bid"`
 }
 
-var accounts map[int64][]Account // Глобальная карта для хранения аккаунтов
+var accounts map[int64][]Account // Глобальная переменная для хранения аккаунтов
 
 func main() {
 	fmt.Println("Бот запущен. Инициализация БД ...")
@@ -52,8 +52,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	accounts = make(map[int64][]Account)                                             // Инициализация карты аккаунтов
-	bot, err := tgbotapi.NewBotAPI(Token) // Создание нового бота
+	accounts = make(map[int64][]Account)  // Инициализация аккаунтов
+	bot, err := tgbotapi.NewBotAPI(botToken) // Создание нового бота
 	if err != nil {
 		log.Panic(err) // Если возникают ошибки, программа завершается
 	}
@@ -64,9 +64,9 @@ func main() {
 	u.Timeout = 60
 
 	fmt.Println("Бот готов к работе, ждет команд.")
-	updates, err := bot.GetUpdatesChan(u) // Получение обновлений от бота
+	updates, err := bot.GetUpdatesChan(u) // Получение сообщений от бота
 
-	// Обработка обновлений
+	// Обработка сообщений
 	for update := range updates {
 		// Пропустить сообщения без команд
 		if update.Message == nil {
@@ -105,7 +105,7 @@ func InitDB(dbName string) (*sql.DB, error) {
 	}
 
 	// Создание таблицы с ценами на золото, если ее еще не существует
-	_, err = db.Exec("CREATE TABLE IF NOT EXISTS gold_prices (id INTEGER PRIMARY KEY, date_time DATETIME, oz_usd_price REAL)")
+	_, err = db.Exec("CREATE TABLE IF NOT EXISTS gold_prices (id INTEGER PRIMARY KEY, date DATE, oz_usd_price REAL)")
 	if err != nil {
 		return nil, err
 	}
@@ -277,9 +277,9 @@ func HandleGetSumCommand(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.D
 		}
 		total += amount
 	}
-        if args != "" {
-                msgText += fmt.Sprintf("Total in %s: %.2f", args, total) + "\n"
-        }
+	if args != "" {
+		msgText += fmt.Sprintf("Total in %s: %.2f", args, total) + "\n"
+	}
 	msg := tgbotapi.NewMessage(chatID, msgText)
 	bot.Send(msg)
 }
@@ -347,15 +347,34 @@ func AddTotalToAccount(chatID int64, currency string, amount float64, db *sql.DB
 	return nil
 }
 
-func GetGoldValue(db *sql.DB) (float64, error) {
+func GetGoldValue(db *sql.DB, args ...int) (float64, error) {
 	var grammInOz = 28.3495
 	var coefToSell = 0.84
+	var goldPrice GoldApiResponse
+	var goldApiNumber int
+    	
+	// Если передан
+	if len(args) > 0 {
+       		goldApiNumber = args[0]
+    	} else {
+ 		goldApiNumber = 0
+    	}
+
+	query := "select oz_usd_price from gold_prices where date = date() limit 1"
+	row := db.QueryRow(query)
+	var err = row.Scan(&goldPrice.Price)
+	if err != nil {
+		fmt.Println("Not yet saved gold prices for today in local history table. Creating reuest to API...")
+	} else {
+		fmt.Println("Last TODAY's gold price have gotten from local history table - ", goldPrice.Price)
+		return goldPrice.Price / grammInOz * coefToSell, nil
+	}
+
 	req, err := http.NewRequest("GET", "https://www.goldapi.io/api/XAU/USD", nil)
 	if err != nil {
 		return 0, err
 	}
-	//req.Header.Set("x-access-token", "goldapi-qnorlp5jccye-io")
-	req.Header.Set("x-access-token", "goldapi-4etusw4rlpecswtg-io")
+	req.Header.Set("x-access-token", goldApiToken[goldApiNumber])
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -371,26 +390,33 @@ func GetGoldValue(db *sql.DB) (float64, error) {
 	// Печать тела ответа
 	//fmt.Println(string(body))
 
-	var goldPrice GoldApiResponse
 	err = json.Unmarshal(body, &goldPrice)
 	if err != nil {
 		return 0, err
 	}
 	if goldPrice.Price == 0 {
-		fmt.Println("GOLD API error: %v. Trying to get from local history table", string(body))
-		query := "select oz_usd_price from gold_prices order by date_time desc limit 1"
+		var lastDate string
+		goldApiNumber++
+		if (goldApiNumber < len(goldApiToken)) {
+			fmt.Println(fmt.Sprintf("GOLD API error: %v. Trying to get from the next [%v] token", string(body), goldApiNumber))
+			GetGoldValue(db, goldApiNumber);
+		}
+		fmt.Println(fmt.Sprintf("GOLD API error: %v try unsuccessful. Trying to get from local history table", goldApiNumber))
+		query := "select oz_usd_price, date from gold_prices order by date desc limit 1"
 		row := db.QueryRow(query)
-		err = row.Scan(&goldPrice.Price)
+		err = row.Scan(&goldPrice.Price, &lastDate)
 		if err != nil {
-			fmt.Println("Error getting gold price from history table:", err)
+			fmt.Println(fmt.Sprintf("Error getting gold price from history table:", err))
 		} else {
-			fmt.Println("Last gold price have gotten from local history table - %v", goldPrice.Price)
+			fmt.Println(fmt.Sprintf("Last gold price have from %v gotten from local history table - %v", lastDate, goldPrice.Price))
 		}
 	} else {
-		query := "INSERT INTO gold_prices (date_time, oz_usd_price) VALUES (datetime(), ?)"
+		query := "INSERT INTO gold_prices (date, oz_usd_price) VALUES (date(), ?)"
 		_, err = db.Exec(query, goldPrice.Price)
 		if err != nil {
 			fmt.Errorf("Error INSERT INTO gold_prices: %v", err)
+		} else {
+			fmt.Println(fmt.Sprintf("Gold price have goten from API - %v", goldPrice.Price))
 		}
 	}
 	return goldPrice.Price / grammInOz * coefToSell, nil
