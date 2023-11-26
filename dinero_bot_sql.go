@@ -78,6 +78,7 @@ func main() {
 			if strings.HasPrefix(cbQuery.Data, "/command getsum ") {
 				cur = strings.TrimPrefix(cbQuery.Data, "/command getsum ")
 				HandleGetSumCommand(bot, update, db, cur)
+				startBotMenu(bot, update)
 			}
 			if strings.HasPrefix(cbQuery.Data, "/command edit ") {
 				cur = strings.TrimPrefix(cbQuery.Data, "/command edit ")
@@ -106,10 +107,12 @@ func main() {
 				cur = strings.TrimPrefix(prevUpdate.CallbackQuery.Data, "/command edit ")
 				bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Новая сумма - "+newAmount+" для валюты - "+cur))
 				HandleEditAccCommand(bot, update, db, cur, newAmount)
+				startBotMenu(bot, update)
 			} else if strings.HasPrefix(prevUpdate.CallbackQuery.Data, "/command add ") {
 				cur = strings.TrimPrefix(prevUpdate.CallbackQuery.Data, "/command add ")
 				bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Cумма - "+newAmount+" для новой валюты - "+cur))
 				HandleAddAccCommand(bot, update, db, cur, newAmount)
+				startBotMenu(bot, update)
 			}
 		}
 		// Пропустить сообщения без команд
@@ -127,7 +130,6 @@ func main() {
 		switch txt {
 		case "start":
 			startBotMenu(bot, update)
-			continue
 		case "add":
 			if update.Message.Command() == "" {
 				showCurrentsList(bot, update, db, txt)
@@ -149,6 +151,8 @@ func main() {
 	}
 }
 
+var isFirstMessage = true
+
 func startBotMenu(bot *tgbotapi.BotAPI, update tgbotapi.Update) {
 	// Создание меню бота с помощью кнопок
 	var keyboard = tgbotapi.NewReplyKeyboard(
@@ -157,8 +161,17 @@ func startBotMenu(bot *tgbotapi.BotAPI, update tgbotapi.Update) {
 			tgbotapi.NewKeyboardButton("edit"),
 			tgbotapi.NewKeyboardButton("getsum"),
 		))
-	msg := tgbotapi.NewMessage(update.Message.Chat.ID,
-		`Этот бот поможет вам управлять вашими счетами в различных валютах.
+	var chatID int64
+	if (update.Message != nil) {
+                chatID = update.Message.Chat.ID
+	} else {
+                chatID = update.CallbackQuery.Message.Chat.ID
+	}
+	var msg = tgbotapi.NewMessage(chatID,"Пожалуйста, выберите действие из меню")
+
+	if isFirstMessage {
+		msg = tgbotapi.NewMessage(update.Message.Chat.ID,
+			`Этот бот поможет вам управлять вашими счетами в различных валютах.
 
     Вот, что вы можете сделать:
 
@@ -167,6 +180,8 @@ func startBotMenu(bot *tgbotapi.BotAPI, update tgbotapi.Update) {
     - "getsum": Получить суммарную информацию по всем счетам.
 
     Просто нажмите на соответствующую кнопку ниже, чтобы начать:`)
+	isFirstMessage = false 
+	}
 	msg.ReplyMarkup = keyboard
 	bot.Send(msg)
 }
