@@ -52,7 +52,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	accounts = make(map[int64][]Account)  // Инициализация аккаунтов
+	accounts = make(map[int64][]Account)     // Инициализация аккаунтов
 	bot, err := tgbotapi.NewBotAPI(botToken) // Создание нового бота
 	if err != nil {
 		log.Panic(err) // Если возникают ошибки, программа завершается
@@ -67,28 +67,170 @@ func main() {
 	updates, err := bot.GetUpdatesChan(u) // Получение сообщений от бота
 
 	// Обработка сообщений
+	var prevUpdate tgbotapi.Update
 	for update := range updates {
+		var cur string
+		if update.CallbackQuery != nil {
+			var cbQuery = update.CallbackQuery
+			fmt.Println(cbQuery.Data)
+			if strings.HasPrefix(cbQuery.Data, "/command getsum ") {
+				cur = strings.TrimPrefix(cbQuery.Data, "/command getsum ")
+				HandleGetSumCommand(bot, update, db, cur)
+			}
+			if strings.HasPrefix(cbQuery.Data, "/command edit ") {
+				cur = strings.TrimPrefix(cbQuery.Data, "/command edit ")
+				fmt.Println(cbQuery.Data)
+				msg := tgbotapi.NewMessage(cbQuery.Message.Chat.ID, "Введите новую сумму для "+cur)
+				msg.ReplyMarkup = tgbotapi.ForceReply{
+					ForceReply: true,
+					Selective:  true,
+				}
+				prevUpdate = update
+				bot.Send(msg)
+			}
+			if strings.HasPrefix(cbQuery.Data, "/command add ") {
+				cur = strings.TrimPrefix(cbQuery.Data, "/command add ")
+				msg := tgbotapi.NewMessage(cbQuery.Message.Chat.ID, "Введите сумму для новго счета в "+cur)
+				msg.ReplyMarkup = tgbotapi.ForceReply{
+					ForceReply: true,
+					Selective:  true,
+				}
+				prevUpdate = update
+				bot.Send(msg)
+			}
+		} else if update.Message != nil && update.Message.ReplyToMessage != nil {
+			newAmount := update.Message.Text
+			if strings.HasPrefix(prevUpdate.CallbackQuery.Data, "/command edit ") {
+				cur = strings.TrimPrefix(prevUpdate.CallbackQuery.Data, "/command edit ")
+				bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Новая сумма - "+newAmount+" для валюты - "+cur))
+				HandleEditAccCommand(bot, update, db, cur, newAmount)
+			} else if strings.HasPrefix(prevUpdate.CallbackQuery.Data, "/command add ") {
+				cur = strings.TrimPrefix(prevUpdate.CallbackQuery.Data, "/command add ")
+				bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Cумма - "+newAmount+" для новой валюты - "+cur))
+				HandleAddAccCommand(bot, update, db, cur, newAmount)
+			}
+		}
 		// Пропустить сообщения без команд
 		if update.Message == nil {
 			continue
 		}
 
 		// Определение типа команды
-		switch update.Message.Command() {
+		var txt string
+		if update.Message.Command() == "" {
+			txt = update.Message.Text
+		} else {
+			txt = update.Message.Command()
+		}
+		switch txt {
+		case "start":
+			startBotMenu(bot, update)
+			continue
 		case "add":
-			HandleAddAccCommand(bot, update, db)
+			if update.Message.Command() == "" {
+				showCurrentsList(bot, update, db, txt)
+			} else {
+				HandleAddAccCommand(bot, update, db)
+			}
 		case "edit":
-			HandleEditAccCommand(bot, update, db)
+			if update.Message.Command() == "" {
+				showCurrentsList(bot, update, db, txt)
+			} else {
+				HandleEditAccCommand(bot, update, db)
+			}
 		case "getsum":
 			HandleGetSumCommand(bot, update, db)
-		case "addgold":
-			HandleAddGoldCommand(bot, update, db)
-		default:
-			msg := tgbotapi.NewMessage(update.Message.Chat.ID, "I don't know that command")
-			bot.Send(msg)
+			if update.Message.Command() == "" {
+				showCurrentsList(bot, update, db, txt)
+			}
 		}
-
 	}
+}
+
+func startBotMenu(bot *tgbotapi.BotAPI, update tgbotapi.Update) {
+	// Создание меню бота с помощью кнопок
+	var keyboard = tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("add"),
+			tgbotapi.NewKeyboardButton("edit"),
+			tgbotapi.NewKeyboardButton("getsum"),
+		))
+	msg := tgbotapi.NewMessage(update.Message.Chat.ID,
+		`Этот бот поможет вам управлять вашими счетами в различных валютах.
+
+    Вот, что вы можете сделать:
+
+    - "add": Добавить новый счет.
+    - "edit": Изменить существующий счет.
+    - "getsum": Получить суммарную информацию по всем счетам.
+
+    Просто нажмите на соответствующую кнопку ниже, чтобы начать:`)
+	msg.ReplyMarkup = keyboard
+	bot.Send(msg)
+}
+
+func showCurrentsList(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.DB, commandType string) {
+	var query string
+	query = "SELECT currency FROM accounts WHERE chat_id = ? AND currency != 'GOLD'"
+	if commandType == "add" {
+		query = `
+SELECT currency FROM (
+    SELECT 'USD' AS currency
+    UNION ALL SELECT 'EUR'
+    UNION ALL SELECT 'RUB'
+    UNION ALL SELECT 'GOLD'
+) AS c
+WHERE currency NOT IN (
+    SELECT currency FROM accounts WHERE chat_id = ?
+    )`
+	}
+	rows, err := db.Query(query, update.Message.Chat.ID)
+	if err != nil {
+		log.Println("Error querying accounts:", err)
+		return
+	}
+	defer rows.Close()
+
+	var accounts []Account
+	for rows.Next() {
+		var account Account
+		err := rows.Scan(&account.Currency)
+		if err != nil {
+			log.Println("Error scanning account:", err)
+			continue
+		}
+		accounts = append(accounts, account)
+	}
+	if err := rows.Err(); err != nil {
+		log.Println("Error iterating accounts:", err)
+		return
+	}
+
+	var buttons []tgbotapi.InlineKeyboardButton
+	for _, account := range accounts {
+		command := commandType + " " + account.Currency
+		callbackData := "/command " + command
+		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(account.Currency, callbackData))
+	}
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons)
+
+	var msgTxt string
+	switch commandType {
+	case "add":
+		msgTxt = "Выберите счет для добавления:"
+	case "edit":
+		msgTxt = "Выберите счет для изменения:"
+	case "getsum":
+		msgTxt = "Выберите валюту для отображения данных:"
+	default:
+		msgTxt = "Ошибка выбора команды"
+	}
+
+	msg := tgbotapi.NewMessage(update.Message.Chat.ID, msgTxt)
+	msg.ReplyMarkup = keyboard
+
+	bot.Send(msg)
 }
 
 // Инициализация БД
@@ -113,11 +255,12 @@ func InitDB(dbName string) (*sql.DB, error) {
 }
 
 // Обработка команды "add"
-func HandleAddAccCommand(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.DB) {
-	args := strings.Split(update.Message.CommandArguments(), " ")
+func HandleAddAccCommand(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.DB, args ...string) {
+	//args := strings.Split(update.Message.CommandArguments(), " ")
 	if len(args) < 2 {
-		msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Not enough parameters")
+		msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Please insert current name (RUB, USD, EUR, GOLD ...)")
 		bot.Send(msg) // Если недостаточно параметров, отправить сообщение об ошибке
+
 		return
 	}
 
@@ -145,14 +288,28 @@ func HandleAddAccCommand(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.D
 	bot.Send(msg) // Отправить сообщение об успешном добавлении аккаунта
 }
 
-func HandleEditAccCommand(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.DB) {
-	args := strings.Split(update.Message.CommandArguments(), " ")
+func HandleEditAccCommand(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.DB, args ...string) {
+	var chatID int64
+	var currency string
+	var newAmount float64
+
+	if update.Message != nil {
+		chatID = update.Message.Chat.ID
+		currency = update.Message.CommandArguments()
+		if currency == "" {
+			currency = args[0]
+		}
+	} else {
+		chatID = update.CallbackQuery.Message.Chat.ID
+		currency = args[0]
+	}
+
 	if len(args) < 2 {
 		msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Not enough parameters")
 		bot.Send(msg)
 		return
 	}
-	currency := args[0]
+
 	newAmount, err := strconv.ParseFloat(args[1], 64)
 	if err != nil {
 		msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Invalid amount")
@@ -160,38 +317,54 @@ func HandleEditAccCommand(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.
 		return
 	}
 
-	chatID := update.Message.Chat.ID
-	// Check if account with the given currency exists
-	query := "SELECT COUNT(*) FROM accounts WHERE chat_id = ? AND currency = ?"
-	row := db.QueryRow(query, chatID, currency)
-	var accountCount int
-	err = row.Scan(&accountCount)
-	if err != nil {
-		fmt.Println("Error checking account:", err)
-		return
-	}
-
-	if accountCount > 0 {
-		// Update existing account
-		query = "UPDATE accounts SET amount = ? WHERE chat_id = ? AND currency = ?"
-		_, err = db.Exec(query, newAmount, chatID, currency)
-		if err != nil {
-			fmt.Println("Error updating account:", err)
-			return
-		}
-
-		msg := tgbotapi.NewMessage(chatID, "Account edited")
-		bot.Send(msg)
+	if amount, err := GetAccountBalance(db, chatID, currency); err != nil {
+		fmt.Println("Ошибка получения суммы счета:", err)
 	} else {
-		msg := tgbotapi.NewMessage(chatID, "Account not found")
-		bot.Send(msg)
+		if amount != -1 {
+			// Обновление существующего счета
+			query := "UPDATE accounts SET amount = ? WHERE chat_id = ? AND currency = ?"
+			_, err = db.Exec(query, newAmount, chatID, currency)
+			if err != nil {
+				fmt.Println("Ошибка обновления счета:", err)
+				return
+			}
+
+			msg := tgbotapi.NewMessage(chatID, "Счет изменен")
+			bot.Send(msg)
+		} else {
+			msg := tgbotapi.NewMessage(chatID, "Счет не найден")
+			bot.Send(msg)
+		}
 	}
 }
 
+func GetAccountBalance(db *sql.DB, chatID int64, currency string) (int, error) {
+	query := "SELECT amount FROM accounts WHERE chat_id = ? AND currency = ?"
+	row := db.QueryRow(query, chatID, currency)
+	var accountBalance int
+	err := row.Scan(&accountBalance)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return -1, nil // Здесь используем -1 для обозначения отсутствующего счета
+		} else {
+			return 0, err
+		}
+	}
+	return accountBalance, nil
+}
+
 // Обработка команды "getsum"
-func HandleGetSumCommand(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.DB) {
-	chatID := update.Message.Chat.ID
-	args := update.Message.CommandArguments()
+func HandleGetSumCommand(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.DB, args ...string) {
+	var chatID int64
+	var currency string
+
+	if update.Message != nil {
+		chatID = update.Message.Chat.ID
+		currency = update.Message.CommandArguments()
+	} else {
+		chatID = update.CallbackQuery.Message.Chat.ID
+		currency = args[0]
+	}
 
 	// Query the database to get the accounts for the chatID
 	rows, err := db.Query("SELECT currency, amount FROM accounts WHERE chat_id=?", chatID)
@@ -221,10 +394,10 @@ func HandleGetSumCommand(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.D
 
 	var rates CurrencyRates
 	// если аргументы для команды указаны, тогда получаем стоимость в указанной валюте
-	if args != "" {
-		res, err := http.Get("https://api.exchangerate-api.com/v4/latest/" + args)
+	if currency != "" {
+		res, err := http.Get("https://api.exchangerate-api.com/v4/latest/" + currency)
 		if err != nil {
-			msg := tgbotapi.NewMessage(chatID, "Unsupported currency: "+args)
+			msg := tgbotapi.NewMessage(chatID, "Unsupported currency: "+currency)
 			bot.Send(msg)
 			return
 		}
@@ -241,7 +414,7 @@ func HandleGetSumCommand(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.D
 		}
 
 		amount := acc.Amount
-		if args != "" {
+		if currency != "" {
 			// переведем стоимость валюты в необходимую
 			rate, ok := rates.Rates[acc.Currency]
 			if !ok {
@@ -252,7 +425,7 @@ func HandleGetSumCommand(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.D
 			amount = (acc.Amount / rate)
 		}
 
-		msgText += fmt.Sprintf("%s: %.2f %s\n", acc.Currency, amount, args)
+		msgText += fmt.Sprintf("%s: %.2f %s\n", acc.Currency, amount, currency)
 		total += amount
 	}
 
@@ -267,18 +440,18 @@ func HandleGetSumCommand(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.D
 		}
 
 		var amount float64
-		if args != "" {
+		if currency != "" {
 			// переведем в необходимую стоимость
 			amount = goldAmount * goldValue / rates.Rates["USD"]
-			msgText += fmt.Sprintf("GOLD: %.2f g. (%.2f %s)", goldAmount, amount, args) + "\n"
+			msgText += fmt.Sprintf("GOLD: %.2f g. (%.2f %s)", goldAmount, amount, currency) + "\n"
 		} else {
 			amount = goldAmount * goldValue
 			msgText += fmt.Sprintf("GOLD: %.2f g. (%.2f$)", goldAmount, amount) + "\n"
 		}
 		total += amount
 	}
-	if args != "" {
-		msgText += fmt.Sprintf("Total in %s: %.2f", args, total) + "\n"
+	if currency != "" {
+		msgText += fmt.Sprintf("Total in %s: %.2f", currency, total) + "\n"
 	}
 	msg := tgbotapi.NewMessage(chatID, msgText)
 	bot.Send(msg)
@@ -352,13 +525,13 @@ func GetGoldValue(db *sql.DB, args ...int) (float64, error) {
 	var coefToSell = 0.84
 	var goldPrice GoldApiResponse
 	var goldApiNumber int
-    	
+
 	// Если передан
 	if len(args) > 0 {
-       		goldApiNumber = args[0]
-    	} else {
- 		goldApiNumber = 0
-    	}
+		goldApiNumber = args[0]
+	} else {
+		goldApiNumber = 0
+	}
 
 	query := "select oz_usd_price from gold_prices where date = date() limit 1"
 	row := db.QueryRow(query)
@@ -397,9 +570,9 @@ func GetGoldValue(db *sql.DB, args ...int) (float64, error) {
 	if goldPrice.Price == 0 {
 		var lastDate string
 		goldApiNumber++
-		if (goldApiNumber < len(goldApiToken)) {
+		if goldApiNumber < len(goldApiToken) {
 			fmt.Println(fmt.Sprintf("GOLD API error: %v. Trying to get from the next [%v] token", string(body), goldApiNumber))
-			GetGoldValue(db, goldApiNumber);
+			GetGoldValue(db, goldApiNumber)
 		}
 		fmt.Println(fmt.Sprintf("GOLD API error: %v try unsuccessful. Trying to get from local history table", goldApiNumber))
 		query := "select oz_usd_price, date from gold_prices order by date desc limit 1"
