@@ -46,6 +46,8 @@ type GoldApiResponse struct {
 
 var accounts map[int64][]Account // Глобальная переменная для хранения аккаунтов
 
+var currencies = []string{"USD", "EUR", "JPY", "GBP", "AUD", "CAD", "CHF", "CNY", "SEK", "NZD", "MXN", "SGD", "HKD", "NOK", "KRW", "TRY", "INR", "RUB", "BRL", "ZAR"}
+
 func main() {
 	fmt.Println("Бот запущен. Инициализация БД ...")
 	db, err := InitDB("account.db")
@@ -173,17 +175,17 @@ func showCurrentsList(bot *tgbotapi.BotAPI, update tgbotapi.Update, db *sql.DB, 
 	var query string
 	query = "SELECT currency FROM accounts WHERE chat_id = ? AND currency != 'GOLD'"
 	if commandType == "add" {
-		query = `
-SELECT currency FROM (
-    SELECT 'USD' AS currency
-    UNION ALL SELECT 'EUR'
-    UNION ALL SELECT 'RUB'
-    UNION ALL SELECT 'GOLD'
-) AS c
-WHERE currency NOT IN (
-    SELECT currency FROM accounts WHERE chat_id = ?
-    )`
+		// Build the SQL query
+		baseQuery := "SELECT currency FROM ( "
+		unionQueries := make([]string, len(currencies))
+
+		for i, currency := range currencies {
+			unionQueries[i] = fmt.Sprintf("SELECT '%s' AS currency ", currency)
+		}
+
+		query = baseQuery + strings.Join(unionQueries, " UNION ALL ") + " ) AS c WHERE currency NOT IN ( SELECT currency FROM accounts WHERE chat_id = ? )"
 	}
+
 	rows, err := db.Query(query, update.Message.Chat.ID)
 	if err != nil {
 		log.Println("Error querying accounts:", err)
@@ -206,14 +208,15 @@ WHERE currency NOT IN (
 		return
 	}
 
-	var buttons []tgbotapi.InlineKeyboardButton
+	var rowsOfButtons [][]tgbotapi.InlineKeyboardButton
 	for _, account := range accounts {
 		command := commandType + " " + account.Currency
 		callbackData := "/command " + command
-		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(account.Currency, callbackData))
+		row := []tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardButtonData(account.Currency, callbackData)}
+		rowsOfButtons = append(rowsOfButtons, row)
 	}
 
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons)
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(rowsOfButtons...)
 
 	var msgTxt string
 	switch commandType {
